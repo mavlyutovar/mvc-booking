@@ -2,61 +2,73 @@
 
 namespace App\Http\Controllers;
 
-use App\Models\Booking;
+use App\Http\Requests\StoreBookingRequest;
 use App\Models\Room;
-use Carbon\Carbon;
+use App\Services\Booking\BookingService;
+use Carbon\CarbonImmutable;
 use Illuminate\Http\Request;
-use Illuminate\Support\Facades\DB;
-use Illuminate\Support\Facades\Log;
 
 class BookingController extends Controller
 {
+    public function __construct(
+        private readonly BookingService $bookingService,
+    ) {
+    }
+
+    /**
+     * Получить бронирования текущего пользователя.
+     */
     public function index(Request $request)
     {
-        return Booking::where('user_id', $request->user()->id)
-            ->orderByRaw('starts_at DESC')
-            ->paginate(20);
+        $bookings = $this->bookingService->getForUser($request->user());
+
+        return response()->json($bookings);
     }
 
-    public function store(Request $request)
+    /**
+     * Создать бронирование.
+     */
+    public function store(StoreBookingRequest $request)
     {
-        $conflict = DB::select("SELECT id FROM bookings
-            WHERE room_id = {$request->room_id}
-            AND starts_at <= '{$request->ends_at}'
-            AND ends_at >= '{$request->starts_at}'");
+        $data = $request->validated();
 
-        if ($conflict) {
-            return response()->json(['error' => 'Комната занята'], 409);
-        }
+        $booking = $this->bookingService->create(
+            user: $request->user(),
+            roomId: (int) $data['room_id'],
+            title: $data['title'],
+            startsAt: CarbonImmutable::parse($data['starts_at']),
+            endsAt: CarbonImmutable::parse($data['ends_at']),
+        );
 
-        $start = Carbon::parse($request->starts_at);
-        if ($start->hour < 9 || $start->hour >= 20) {
-            return response()->json(['error' => 'Нерабочее время'], 422);
-        }
-
-        $booking = Booking::create($request->all());
-
-        Log::withContext(['booking_id' => $booking->id]);
-        Log::channel('bookings')->info('Booking created');
-
-        return $booking;
+        return response()->json($booking, 201);
     }
 
-    public function destroy($id)
+    /**
+     * Отменить бронирование.
+     */
+    public function destroy(Request $request, int $id)
     {
-        Booking::findOrFail($id)->delete();
+        $this->bookingService->cancel(
+            user: $request->user(),
+            bookingId: $id,
+        );
 
         return response()->noContent();
     }
 
+    /**
+     * Получить бронирования комнаты на сегодня.
+     *
+     * Оставляем существующую реализацию метода без изменений.
+     */
     public function today(Room $room)
     {
         return $room->bookings()
             ->whereDate('starts_at', today())
             ->get()
-            ->map(fn ($b) => [
-                'time' => $b->starts_at . ' – ' . $b->ends_at,
-                'author' => $b->user->name,
+            ->map(fn ($booking) => [
+                'time' => $booking->starts_at . ' – ' . $booking->ends_at,
+                'author' => $booking->user->name,
             ]);
     }
 }
